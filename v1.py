@@ -162,8 +162,8 @@ modelo += lpSum(
 
 #-------------------------------------------------------------------------------------------------
 #Solve
-
-modelo.solve(PULP_CBC_CMD(msg=True))
+#(tiene early stop)
+modelo.solve(PULP_CBC_CMD(msg=True, timeLimit=60))
 
 
 # Resultados
