@@ -44,7 +44,7 @@ d = {
 }     #temp
 
 # Capacidad
-Q = 40     #temp
+Q = 50
 
 
 
