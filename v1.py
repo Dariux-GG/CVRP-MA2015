@@ -1,11 +1,10 @@
+import math
 from pulp import *
 
 
 
 
 #Datos iniciales
-
-
 nodos = range(11)
 clientes = range(1, 11)
 m = len(clientes)
@@ -41,174 +40,180 @@ d = {
     8: 11,
     9: 13,
     10: 17
-}     #temp
+}
+
+N = list(range(len(c)))
+DEPOSITO = 0
+
 
 # Capacidad
 Q = 50
 
+# parametros
+time_limit = 60
+gap = 0.01
+
+
+N_clientes    = [i for i in N if i != DEPOSITO]
+total_demanda = sum(d[i] for i in N_clientes)
+max_viajes    = math.ceil(total_demanda / Q)
+print(f"[INFO] Clientes a rutear: {len(N_clientes)}, demanda total={total_demanda:.1f}")
+print(f"[INFO] Q={Q}, max_viajes posibles={max_viajes}")
 
 
 #-------------------------------------------------------------------------------------------------
 #Modelo
-modelo = LpProblem("CVRP", LpMinimize)
+model = LpProblem("CVRP", LpMinimize)
 #-------------------------------------------------------------------------------------------------
+
+
+arcos = [(i, j) for i in N for j in N if i != j]
 
 # variables
-x = {}
-for i in nodos:
-    for j in nodos:
-        if i != j:
-            for k in vehiculos:
-                x[i, j, k] = LpVariable(
-                    f"x_{i}_{j}_{k}",
-                    cat="Binary"
-                )
-#esto esta interesante pero básicamente si tenemos x_ijk, la variable se guarda como x[i,j,k] 
+x = LpVariable.dicts("x", arcos, 0, 1, LpBinary)
+f = LpVariable.dicts("f", arcos, 0)
 
-u = LpVariable.dicts("u", clientes, lowBound=0, cat="Continuous")
-#-------------------------------------------------------------------------------------------------
+
+# OBJETIVO: minimizar distancia total
+model += lpSum(c[i][j] * x[(i, j)] for i, j in arcos)
+
 
 
 #Restricciones
 
 # Cada cliente es visitado exactamente una vez
-for j in clientes:
-    modelo += (
-        lpSum(
-            x[i, j, k]
-            for k in vehiculos
-            for i in nodos
-            if i != j
-        ) == 1
-    )
+for i in N_clientes:
+    model += lpSum(x[(j, i)] for j in N if j != i) == 1, f"entrada_{i}"
+    model += lpSum(x[(i, j)] for j in N if j != i) == 1, f"salida_{i}"
 
 
-# Conservación de flujo
-for k in vehiculos:
-    for j in nodos:
+# Balance de depósito
+model += (lpSum(x[(DEPOSITO, j)] for j in N_clientes) == lpSum(x[(i, DEPOSITO)] for i in N_clientes)), "balance_deposito"
+model += (lpSum(x[(DEPOSITO, j)] for j in N_clientes) <= max_viajes), "max_rutas"
+ 
 
-        entradas = lpSum(
-            x[i, j, k]
-            for i in nodos
-            if i != j
-        )
-
-        salidas = lpSum(
-            x[j, l, k]
-            for l in nodos
-            if l != j
-        )
-
-        modelo += entradas == salidas
+for i in N_clientes:
+    model += (lpSum(x[(i, j)] for j in N if j != i) == lpSum(x[(j, i)] for j in N if j != i)), f"balance_vehiculo_{i}"
 
 
-# Cada vuelta sale a lo sumo una vez del depósito
-for k in vehiculos:
-    modelo += lpSum(
-        x[0, j, k]
-        for j in clientes
-    ) <= 1
-
-# Cada vehículo regresa a lo sumo una vez al depósito
-for k in vehiculos:
-    modelo += lpSum(
-        x[i, 0, k]
-        for i in clientes
-    ) <= 1
-
-
-# Capacidad del vehículo
-for k in vehiculos:
-    modelo += lpSum(
-        d[i] * x[i, j, k]
-        for i in clientes
-        for j in nodos
-        if i != j
-    ) <= Q
-
-
-# Prevención de subtours (MTZ)
-for k in vehiculos:
-    for i in clientes:
-        for j in clientes:
-
-            if i != j:
-
-                modelo += (
-                    u[i] - u[j]
-                    + Q * x[i, j, k]
-                    <= Q - d[j]
-                )
-
-
-# Límites de carga acumulada
-for i in clientes:
-
-    modelo += u[i] >= d[i]
-    modelo += u[i] <= Q
-
+#Capacidad
+for i in N_clientes:
+    model += (lpSum(f[(i, j)] for j in N if j != i) - lpSum(f[(j, i)] for j in N if j != i) == d[i]), f"flujo_carga_{i}"
+for i, j in arcos:
+    model += f[(i, j)] <= Q * x[(i, j)], f"cap_{i}_{j}"
+for j in N_clientes:
+    model += f[(DEPOSITO, j)] == 0, f"vacio_salida_{j}"
+for i in N_clientes:
+    model += f[(i, DEPOSITO)] <= Q * x[(i, DEPOSITO)], f"cap_regreso_{i}"
 
 #-------------------------------------------------------------------------------------------------
 
-# objetivo
-modelo += lpSum(
-    c[i][j] * x[i, j, k]
-    for i in nodos
-    for j in nodos
-    if i != j
-    for k in vehiculos
-)
 
-
-#-------------------------------------------------------------------------------------------------
-#Solve
-#(tiene early stop)
-modelo.solve(PULP_CBC_CMD(msg=True, timeLimit=60))
-
-
-# Resultados
-
-print("RESULTADOS:\n\n")
-
-print("Estado:", LpStatus[modelo.status])
-print("Distancia total:", value(modelo.objective))
-for k in vehiculos:
-    # Arcos utilizados en esta vuelta
-    arcos = []
-    for i in nodos:
-        for j in nodos:
-            if i != j:
-                if value(x[i, j, k]) == 1:
-                    arcos.append((i, j))
-
-    # Si la vuelta no se utiliza
-    if len(arcos) == 0:
-        continue
-    print(f"\nVuelta {k}")
-    print("Arcos:", arcos)
-
-    # Construir la ruta
-    ruta = [0]
-    actual = 0
-    while True:
-        siguiente = None
-        for i, j in arcos:
-            if i == actual:
-                siguiente = j
+# WARM START (Nearest Neighbor + 2-opt)
+def nearest_neighbor_vrp(N_clientes, c, d, Q, deposito=DEPOSITO):
+    restantes = set(N_clientes)
+    rutas = []
+    while restantes:
+        # arranca cada ruta con el nodo más cercano al depósito que quede
+        inicio = min(restantes, key=lambda i: c[deposito][i])
+        ruta, carga, actual = [inicio], d[inicio], inicio
+        restantes.remove(inicio)
+        while True:
+            candidatos = [n for n in restantes if carga + d[n] <= Q]
+            if not candidatos:
                 break
-        if siguiente is None:
-            break
-        ruta.append(siguiente)
-        if siguiente == 0:
-            break
-        actual = siguiente
-    print("Ruta:", " -> ".join(map(str, ruta)))
+            siguiente = min(candidatos, key=lambda n: c[actual][n])
+            ruta.append(siguiente)
+            carga += d[siguiente]
+            restantes.remove(siguiente)
+            actual = siguiente
+        rutas.append(ruta)
+    return rutas
+ 
+rutas_nn = nearest_neighbor_vrp(N_clientes, c, d, Q)
+ 
+def two_opt(ruta, c, deposito=DEPOSITO):
+    seq = [deposito] + ruta + [deposito]
+    mejor = seq[:]
+    mejorado = True
+    while mejorado:
+        mejorado = False
+        for i in range(1, len(mejor) - 2):
+            for j in range(i + 1, len(mejor) - 1):
+                nueva = mejor[:i] + mejor[i:j+1][::-1] + mejor[j+1:]
+                costo_actual = sum(c[mejor[k]][mejor[k+1]] for k in range(len(mejor)-1))
+                costo_nueva  = sum(c[nueva[k]][nueva[k+1]]  for k in range(len(nueva)-1))
+                if costo_nueva < costo_actual:
+                    mejor = nueva
+                    mejorado = True
+    return mejor[1:-1]
+ 
+rutas_nn = [two_opt(r, c) for r in rutas_nn]
+ 
+for v in x.values(): v.setInitialValue(0)
+for v in f.values(): v.setInitialValue(0)
+ 
+for ruta in rutas_nn:
+    secuencia = [DEPOSITO] + ruta + [DEPOSITO]
+    carga_acum = 0
+    for k in range(len(secuencia) - 1):
+        i, j = secuencia[k], secuencia[k+1]
+        x[(i, j)].setInitialValue(1)
+        if i == DEPOSITO:
+            f[(i, j)].setInitialValue(0)
+        else:
+            carga_acum += d[i]
+            f[(i, j)].setInitialValue(carga_acum)
+ 
+print(f"[NN+2OPT] {len(rutas_nn)} rutas, {sum(len(r) for r in rutas_nn)}/{len(N_clientes)} nodos cubiertos")
+for k, ruta in enumerate(rutas_nn):
+    print(f"  Ruta {k+1}: {[DEPOSITO]+ruta+[DEPOSITO]}  |  Cajas: {sum(d[i] for i in ruta):.1f}/{Q}")
 
-    # Distancia de la vuelta
-    distancia_vuelta = sum(
-        c[i][j]
-        for i, j in arcos
+# -------------------------------
+# SOLVER
+# -------------------------------
+print("\n[INFO] Resolviendo...")
+model.solve(PULP_CBC_CMD(timeLimit=time_limit, gapRel=gap, msg=1, warmStart=True, keepFiles=True))
+
+def val(v):
+    return value(v) if value(v) is not None else 0.0
+ 
+print("\n" + "=" * 60)
+print("RESULTADOS")
+print("=" * 60)
+print(f"Status:            {LpStatus[model.status]}")
+print(f"Distancia total:   {val(model.objective):.4f}")
+ 
+costo_total = sum(c[i][j] * val(x[(i, j)]) for i, j in arcos)
+n_rutas     = int(round(sum(val(x[(DEPOSITO, j)]) for j in N_clientes)))
+ 
+print(f"Clientes visitados: {len(N_clientes)} de {len(N_clientes)}")
+print(f"Demanda cubierta:   {total_demanda:.1f} de {total_demanda:.1f} cajas")
+print(f"Rutas abiertas:     {n_rutas}  (máximo permitido={max_viajes})")
+ 
+# Reconstruir rutas
+arcos_on = {(i, j) for i, j in arcos if val(x[(i, j)]) > 0.5}
+print("Arcos utilizados:")
+print(arcos_on)
+
+siguiente = {i: j for i, j in arcos_on}
+rutas = []
+for primer_nodo in [j for j in N_clientes if (DEPOSITO, j) in arcos_on]:
+    ruta = []
+    actual = primer_nodo
+    while actual != DEPOSITO:
+        ruta.append(actual)
+        actual = siguiente[actual]
+    rutas.append(ruta)
+# Imprimir rutas
+print("\nRUTAS:")
+for k, ruta in enumerate(rutas, 1):
+    secuencia = [DEPOSITO] + ruta + [DEPOSITO]
+    distancia = sum(c[secuencia[i]][secuencia[i+1]]
+                    for i in range(len(secuencia)-1))
+    carga = sum(d[i] for i in ruta)
+    print(
+        f"Ruta {k}: {secuencia} | "
+        f"Carga: {carga}/{Q} | "
+        f"Distancia: {distancia:.2f}"
     )
-    print("Distancia:", distancia_vuelta)
-
-print("\n==============================")
