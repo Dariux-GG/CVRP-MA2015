@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 import random
 
 nodos = 11
@@ -41,14 +40,28 @@ for i in range(1, nodos + 1):
         distancias[i][j] = np.linalg.norm(nodos_coords[i] - nodos_coords[j])
 
 
-def evaluar_split(individuo, distancias=distancias, demandas=nodos_demanda,
-                   capacidad=capacidad_vehiculo, deposito=DEPOSITO):
+def _datos_instancia(instancia):
+    if instancia is None:
+        return clientes, distancias, nodos_demanda, capacidad_vehiculo, DEPOSITO
+    return (instancia.clientes, instancia.distancias, instancia.demandas,
+            instancia.capacidad, instancia.deposito)
+
+
+def evaluar_split(individuo, distancias=None, demandas=None,
+                   capacidad=None, deposito=None, instancia=None):
     """
     Dado un giant tour (permutación de clientes), encuentra la partición
     óptima en rutas factibles vía programación dinámica.
     Regresa (costo_total, predecesor) donde predecesor permite reconstruir
     los cortes de ruta.
     """
+    if instancia is not None:
+        _, distancias, demandas, capacidad, deposito = _datos_instancia(instancia)
+    else:
+        distancias = globals()['distancias'] if distancias is None else distancias
+        demandas = nodos_demanda if demandas is None else demandas
+        capacidad = (capacidad_vehiculo if capacidad is None else capacidad)
+        deposito = DEPOSITO if deposito is None else deposito
     m = len(individuo)
     costo_min = [float('inf')] * (m + 1)
     predecesor = [None] * (m + 1)
@@ -89,20 +102,21 @@ def reconstruir_rutas(individuo, predecesor):
     return rutas
 
 
-def fitness(individuo):
-    costo, _ = evaluar_split(individuo)
+def fitness(individuo, instancia=None):
+    costo, _ = evaluar_split(individuo, instancia=instancia)
     return costo
 
 
 
-def construir_hormiga(feromona, alfa, beta):
+def construir_hormiga(feromona, alfa, beta, instancia=None):
     """
     Construye un giant tour usando la cantidad de feromona y la distancia
     entre los nodos. Cada hormiga visita todos los clientes una sola vez.
     """
-    no_visitados = clientes[:]
+    clientes_actuales, distancias_actuales, _, _, deposito = _datos_instancia(instancia)
+    no_visitados = clientes_actuales[:]
     individuo = []
-    actual = DEPOSITO
+    actual = deposito
 
     while no_visitados:
 
@@ -111,19 +125,19 @@ def construir_hormiga(feromona, alfa, beta):
         # Calculamos qué tan conveniente es ir a cada cliente
         for cliente in no_visitados:
 
-            fer = feromona[actual][cliente] ** alfa
+            fer = max(feromona[actual][cliente], 1e-12) ** alfa
 
-            if distancias[actual][cliente] == 0:
+            if distancias_actuales[actual][cliente] == 0:
                 visibilidad = 0
             else:
-                visibilidad = (1 / distancias[actual][cliente]) ** beta
+                visibilidad = (1 / distancias_actuales[actual][cliente]) ** beta
 
             pesos.append(fer * visibilidad)
 
         # Elegimos el siguiente cliente usando las probabilidades
         # calculadas con feromona y distancia
         total = sum(pesos)
-        probabilidades = [p / total for p in pesos]
+        probabilidades = None if total <= 0 else [p / total for p in pesos]
 
         siguiente = random.choices(
             no_visitados,
@@ -138,7 +152,8 @@ def construir_hormiga(feromona, alfa, beta):
     return individuo
 
 
-def actualizar_feromona(feromona, hormigas, fitnesses, rho, Q=100):
+def actualizar_feromona(feromona, hormigas, fitnesses, rho, deposito=DEPOSITO,
+                        Q=100):
     """
     Primero se evapora parte de la feromona y después las hormigas
     agregan feromona en los caminos que utilizaron.
@@ -151,8 +166,8 @@ def actualizar_feromona(feromona, hormigas, fitnesses, rho, Q=100):
     # Las mejores soluciones dejan más feromona
     for hormiga, costo in zip(hormigas, fitnesses):
 
-        aporte = Q / costo
-        anterior = DEPOSITO
+        aporte = Q / max(costo, 1e-12)
+        anterior = deposito
 
         for cliente in hormiga:
 
@@ -161,12 +176,22 @@ def actualizar_feromona(feromona, hormigas, fitnesses, rho, Q=100):
 
             anterior = cliente
 
+        feromona[anterior][deposito] += aporte
+        feromona[deposito][anterior] += aporte
+
 
 def hormigas_cvrp(criterio_paro, n_hormigas, n_iteraciones,
-                  alfa, beta, rho):
+                  alfa, beta, rho, instancia=None, semilla=None):
+    if semilla is not None:
+        random.seed(semilla)
+    clientes_actuales, _, _, _, deposito = _datos_instancia(instancia)
+    if n_hormigas < 1 or n_iteraciones < 1:
+        raise ValueError('n_hormigas y n_iteraciones deben ser positivos')
+    if not 0 <= rho < 1:
+        raise ValueError('rho debe estar en [0, 1)')
 
     # Al principio todos los caminos tienen la misma cantidad de feromona
-    nodos_ids = [DEPOSITO] + clientes
+    nodos_ids = [deposito] + clientes_actuales
 
     feromona = {
         i: {
@@ -194,10 +219,11 @@ def hormigas_cvrp(criterio_paro, n_hormigas, n_iteraciones,
             individuo = construir_hormiga(
                 feromona,
                 alfa,
-                beta
+                beta,
+                instancia
             )
 
-            costo = fitness(individuo)
+            costo = fitness(individuo, instancia)
 
             hormigas.append(individuo)
             fitnesses.append(costo)
@@ -207,7 +233,8 @@ def hormigas_cvrp(criterio_paro, n_hormigas, n_iteraciones,
             feromona,
             hormigas,
             fitnesses,
-            rho
+            rho,
+            deposito
         )
 
         # Buscamos la mejor hormiga de esta iteración
@@ -226,7 +253,7 @@ def hormigas_cvrp(criterio_paro, n_hormigas, n_iteraciones,
 
         iteracion += 1
 
-    return mejor_individuo, mejor_fitness
+    return mejor_individuo, mejor_fitness, iteracion
 
 
 
@@ -234,7 +261,7 @@ if __name__ == "__main__":
 
     random.seed(42)
 
-    mejor_individuo, mejor_fitness = hormigas_cvrp(
+    mejor_individuo, mejor_fitness, _ = hormigas_cvrp(
         criterio_paro=100,
         n_hormigas=30,
         n_iteraciones=500,

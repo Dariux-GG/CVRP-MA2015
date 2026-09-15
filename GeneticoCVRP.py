@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 import random
 
 nodos = 11
@@ -41,24 +40,39 @@ for i in range(1, nodos + 1):
         distancias[i][j] = np.linalg.norm(nodos_coords[i] - nodos_coords[j])
 
 
-def generar_poblacion(tamano_poblacion):
+def _datos_instancia(instancia):
+    if instancia is None:
+        return clientes, distancias, nodos_demanda, capacidad_vehiculo, DEPOSITO
+    return (instancia.clientes, instancia.distancias, instancia.demandas,
+            instancia.capacidad, instancia.deposito)
+
+
+def generar_poblacion(tamano_poblacion, clientes_instancia=None):
+    clientes_actuales = clientes if clientes_instancia is None else clientes_instancia
     poblacion = []
     for _ in range(tamano_poblacion):
         # FIX: permutación completa de los clientes (giant tour), no una
         # muestra de tamaño arbitrario.
-        individuo = random.sample(clientes, len(clientes))
+        individuo = random.sample(clientes_actuales, len(clientes_actuales))
         poblacion.append(individuo)
     return poblacion
 
 
-def evaluar_split(individuo, distancias=distancias, demandas=nodos_demanda,
-                   capacidad=capacidad_vehiculo, deposito=DEPOSITO):
+def evaluar_split(individuo, distancias=None, demandas=None,
+                   capacidad=None, deposito=None, instancia=None):
     """
     Dado un giant tour (permutación de clientes), encuentra la partición
     óptima en rutas factibles vía programación dinámica.
     Regresa (costo_total, predecesor) donde predecesor permite reconstruir
     los cortes de ruta.
     """
+    if instancia is not None:
+        _, distancias, demandas, capacidad, deposito = _datos_instancia(instancia)
+    else:
+        distancias = globals()['distancias'] if distancias is None else distancias
+        demandas = nodos_demanda if demandas is None else demandas
+        capacidad = (capacidad_vehiculo if capacidad is None else capacidad)
+        deposito = DEPOSITO if deposito is None else deposito
     m = len(individuo)
     costo_min = [float('inf')] * (m + 1)
     predecesor = [None] * (m + 1)
@@ -99,17 +113,24 @@ def reconstruir_rutas(individuo, predecesor):
     return rutas
 
 
-def fitness(individuo):
-    costo, _ = evaluar_split(individuo)
+def fitness(individuo, instancia=None):
+    costo, _ = evaluar_split(individuo, instancia=instancia)
     return costo
 
 
 def seleccion_torneo(poblacion, fitnesses, tam_torneo=3):
     """Elige tam_torneo individuos al azar y regresa el de mejor fitness
     (menor distancia). Se llama una vez por cada padre que necesites."""
+    tam_torneo = min(tam_torneo, len(poblacion))
     contendientes_idx = random.sample(range(len(poblacion)), tam_torneo)
     mejor_idx = min(contendientes_idx, key=lambda i: fitnesses[i])
     return poblacion[mejor_idx]
+
+
+def seleccion_ruleta(poblacion, fitnesses):
+    """Selecciona favoreciendo soluciones de menor distancia."""
+    pesos = [1 / max(costo, 1e-12) for costo in fitnesses]
+    return random.choices(poblacion, weights=pesos, k=1)[0]
 
 
 def cruce_ox(padre1, padre2):
@@ -141,28 +162,64 @@ def cruce_ox(padre1, padre2):
     return hijo1, hijo2
 
 
-def genetico(criterio_paro: int, tamano_poblacion: int, prob_mutacion: float,
-             tam_torneo: int = 3):
-    poblacion = generar_poblacion(tamano_poblacion)
-    fitnesses = [fitness(individuo) for individuo in poblacion]
-    paro = 0
+def cruce_un_punto(padre1, padre2):
+    """Cruce de un punto que conserva permutaciones válidas."""
+    if len(padre1) < 2:
+        return padre1[:], padre2[:]
+    punto = random.randrange(1, len(padre1))
 
-    while paro < criterio_paro:
+    def construir_hijo(prefijo, relleno):
+        hijo = prefijo[:punto]
+        hijo.extend(gen for gen in relleno if gen not in hijo)
+        return hijo
+
+    return construir_hijo(padre1, padre2), construir_hijo(padre2, padre1)
+
+
+def genetico(criterio_paro: int, tamano_poblacion: int, prob_mutacion: float,
+             tam_torneo: int = 3, instancia=None, tipo_cruce='dos_puntos',
+             metodo_seleccion='torneo', semilla=None, generaciones=None):
+    if semilla is not None:
+        random.seed(semilla)
+    clientes_actuales, _, _, _, _ = _datos_instancia(instancia)
+    if tamano_poblacion < 2:
+        raise ValueError('tamano_poblacion debe ser al menos 2')
+    if not 0 <= prob_mutacion <= 1:
+        raise ValueError('prob_mutacion debe estar entre 0 y 1')
+    if tipo_cruce not in ('un_punto', 'dos_puntos'):
+        raise ValueError('tipo_cruce debe ser un_punto o dos_puntos')
+    if metodo_seleccion not in ('torneo', 'ruleta'):
+        raise ValueError('metodo_seleccion debe ser torneo o ruleta')
+
+    poblacion = generar_poblacion(tamano_poblacion, clientes_actuales)
+    fitnesses = [fitness(individuo, instancia) for individuo in poblacion]
+    paro = 0
+    generaciones_ejecutadas = 0
+    limite_generaciones = generaciones if generaciones is not None else criterio_paro
+
+    while (generaciones_ejecutadas < limite_generaciones and
+           (generaciones is not None or paro < criterio_paro)):
+        mejoro_generacion = False
         for _ in range(tamano_poblacion):
             # Selección por torneo: cada padre es el ganador de un
             # mini-torneo de tam_torneo individuos elegidos al azar.
-            padre1 = seleccion_torneo(poblacion, fitnesses, tam_torneo)
-            padre2 = seleccion_torneo(poblacion, fitnesses, tam_torneo)
+            seleccionar = (seleccion_torneo if metodo_seleccion == 'torneo'
+                           else seleccion_ruleta)
+            padre1 = seleccionar(poblacion, fitnesses, tam_torneo) \
+                if metodo_seleccion == 'torneo' else seleccionar(poblacion, fitnesses)
+            padre2 = seleccionar(poblacion, fitnesses, tam_torneo) \
+                if metodo_seleccion == 'torneo' else seleccionar(poblacion, fitnesses)
 
-            hijo1, hijo2 = cruce_ox(padre1, padre2)
+            cruce = cruce_un_punto if tipo_cruce == 'un_punto' else cruce_ox
+            hijo1, hijo2 = cruce(padre1, padre2)
 
-            if random.random() < prob_mutacion:
-                idx1, idx2 = random.sample(range(len(clientes)), 2)
+            if random.random() < prob_mutacion and len(clientes_actuales) >= 2:
+                idx1, idx2 = random.sample(range(len(clientes_actuales)), 2)
                 hijo1[idx1], hijo1[idx2] = hijo1[idx2], hijo1[idx1]
                 hijo2[idx1], hijo2[idx2] = hijo2[idx2], hijo2[idx1]
 
-            fitness_hijo1 = fitness(hijo1)
-            fitness_hijo2 = fitness(hijo2)
+            fitness_hijo1 = fitness(hijo1, instancia)
+            fitness_hijo2 = fitness(hijo2, instancia)
             peor_idx = fitnesses.index(max(fitnesses))
 
             mejoro = False
@@ -176,14 +233,17 @@ def genetico(criterio_paro: int, tamano_poblacion: int, prob_mutacion: float,
                 fitnesses[peor_idx] = fitness_hijo2
                 mejoro = True
 
-            paro = 0 if mejoro else paro + 1
+            mejoro_generacion = mejoro_generacion or mejoro
+
+        generaciones_ejecutadas += 1
+        paro = 0 if mejoro_generacion else paro + 1
 
     mejor_idx = fitnesses.index(min(fitnesses))
-    return poblacion[mejor_idx], fitnesses[mejor_idx]
+    return poblacion[mejor_idx], fitnesses[mejor_idx], generaciones_ejecutadas
 
 if __name__ == "__main__":
  
-    mejor_individuo, mejor_fitness = genetico(
+    mejor_individuo, mejor_fitness, _ = genetico(
         criterio_paro=3000,
         tamano_poblacion=500,
         prob_mutacion=0.20,
